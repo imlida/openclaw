@@ -1,0 +1,48 @@
+# Docker-in-Docker OpenClaw Deployment
+# Usage: docker compose -f docker-compose.dind.yml up -d
+# From repo root: docker compose -f deploy/docker-compose.dind.yml up -d
+
+services:
+  openclaw-dind:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.dind
+      args:
+        OPENCLAW_DOCKER_APT_PACKAGES: ${OPENCLAW_DOCKER_APT_PACKAGES:-}
+        OPENCLAW_EXTENSIONS: ${OPENCLAW_EXTENSIONS:-}
+    image: ${OPENCLAW_IMAGE:-openclaw:dind}
+    container_name: openclaw-dind
+    privileged: true  # Required for DinD
+    environment:
+      HOME: /home/node
+      TERM: xterm-256color
+      OPENCLAW_GATEWAY_TOKEN: ${OPENCLAW_GATEWAY_TOKEN:-}
+      TZ: ${OPENCLAW_TZ:-UTC}
+      # DinD specific
+      DOCKER_TLS_CERTDIR: ""
+      DOCKER_HOST: unix:///var/run/docker.sock
+    volumes:
+      - ${OPENCLAW_CONFIG_DIR:-~/.openclaw}:/home/node/.openclaw
+      - ${OPENCLAW_WORKSPACE_DIR:-~/.openclaw/workspace}:/home/node/.openclaw/workspace
+      # DinD volumes for persistence
+      - openclaw-docker-data:/var/lib/docker
+    ports:
+      - "${OPENCLAW_GATEWAY_PORT:-18789}:18789"
+      - "${OPENCLAW_BRIDGE_PORT:-18790}:18790"
+    init: true
+    restart: unless-stopped
+    command: >
+      sh -c "
+        chown -R node:node /home/node/.openclaw &&
+        su - node -c 'node /app/openclaw.mjs gateway --bind ${OPENCLAW_GATEWAY_BIND:-lan} --port 18789'
+      "
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:18789/healthz').then((r)=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+
+volumes:
+  openclaw-docker-data:
+    driver: local

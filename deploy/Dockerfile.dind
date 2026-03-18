@@ -1,0 +1,116 @@
+# syntax=docker/dockerfile:1.7
+
+# DinD (Docker-in-Docker) OpenClaw Image
+# Build from repo root: docker build -f deploy/Dockerfile.dind ..
+
+ARG OPENCLAW_NODE_BOOKWORM_IMAGE="node:24-bookworm@sha256:3a09aa6354567619221ef6c45a5051b671f953f0a1924d1f819ffb236e520e6b"
+FROM docker:24-dind AS dind-base
+
+# Install dependencies needed for OpenClaw (excluding nodejs/npm - will copy from official image)
+RUN apk add --no-cache \
+    curl \
+    git \
+    openssl \
+    python3 \
+    py3-pip \
+    bash \
+    procps \
+    tzdata \
+    libstdc++
+
+# Remove Alpine's built-in node if exists (docker:dind includes node v20), then copy Node.js v24 from Alpine
+RUN rm -f /usr/bin/node /usr/bin/npm /usr/bin/npx 2>/dev/null || true
+COPY --from=node:24-alpine /usr/local/bin/node /usr/local/bin/
+COPY --from=node:24-alpine /usr/local/lib/node_modules /usr/local/lib/node_modules
+RUN ln -sf /usr/local/lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm && \
+    ln -sf /usr/local/lib/node_modules/npm/bin/npx-cli.js /usr/local/bin/npx && \
+    ln -sf /usr/local/bin/node /usr/bin/node && \
+    ln -sf /usr/local/bin/npm /usr/bin/npm && \
+    ln -sf /usr/local/bin/npx /usr/bin/npx
+
+# Install Bun
+RUN curl -fsSL https://bun.sh/install | bash
+ENV PATH="/root/.bun/bin:${PATH}"
+
+# Install corepack globally then enable (Alpine node doesn't include corepack)
+RUN npm install -g corepack && corepack enable
+
+# Install Docker Compose v2
+RUN mkdir -p /usr/local/lib/docker/cli-plugins && \
+    curl -SL "https://github.com/docker/compose/releases/download/v2.23.0/docker-compose-linux-$(uname -m)" \
+    -o /usr/local/lib/docker/cli-plugins/docker-compose && \
+    chmod +x /usr/local/lib/docker/cli-plugins/docker-compose
+
+# Build stage - Copy from main Dockerfile pattern
+FROM ${OPENCLAW_NODE_BOOKWORM_IMAGE} AS build
+
+RUN curl -fsSL https://bun.sh/install | bash
+ENV PATH="/root/.bun/bin:${PATH}"
+RUN corepack enable
+
+WORKDIR /app
+COPY package.json pnpm-lock.yaml pnpm-workspace.yaml .npmrc ./
+COPY ui/package.json ./ui/package.json
+COPY patches ./patches
+
+ARG OPENCLAW_EXTENSIONS=""
+COPY extensions /tmp/extensions
+RUN mkdir -p /app/extensions && \
+    for ext in $OPENCLAW_EXTENSIONS; do \
+    if [ -f "/tmp/extensions/$ext/package.json" ]; then \
+    mkdir -p "/app/extensions/$ext" && \
+    cp "/tmp/extensions/$ext/package.json" "/app/extensions/$ext/package.json"; \
+    fi; \
+    done
+
+RUN --mount=type=cache,id=openclaw-pnpm-store,target=/root/.local/share/pnpm/store \
+    NODE_OPTIONS=--max-old-space-size=2048 pnpm install --frozen-lockfile
+
+COPY . .
+RUN pnpm canvas:a2ui:bundle || \
+    (mkdir -p src/canvas-host/a2ui && \
+    echo "stub" > src/canvas-host/a2ui/.bundle.hash)
+RUN pnpm build:docker
+ENV OPENCLAW_PREFER_PNPM=1
+RUN pnpm ui:build
+
+FROM build AS runtime-assets
+RUN CI=true pnpm prune --prod && \
+    find dist -type f \( -name '*.d.ts' -o -name '*.map' \) -delete
+
+# Final DinD runtime image
+FROM dind-base AS runtime
+
+WORKDIR /app
+
+# Copy OpenClaw runtime files
+COPY --from=runtime-assets /app/dist ./dist
+COPY --from=runtime-assets /app/node_modules ./node_modules
+COPY --from=runtime-assets /app/package.json .
+COPY --from=runtime-assets /app/openclaw.mjs .
+COPY --from=runtime-assets /app/extensions ./extensions
+COPY --from=runtime-assets /app/skills ./skills
+COPY --from=runtime-assets /app/docs ./docs
+
+# Install additional packages if specified
+ARG OPENCLAW_DOCKER_APT_PACKAGES=""
+RUN if [ -n "$OPENCLAW_DOCKER_APT_PACKAGES" ]; then \
+    apk add --no-cache $OPENCLAW_DOCKER_APT_PACKAGES; \
+    fi
+
+# Setup entrypoint script
+COPY deploy/dind-entrypoint.sh /usr/local/bin/dind-entrypoint.sh
+RUN chmod +x /usr/local/bin/dind-entrypoint.sh
+
+# Create openclaw user for running the gateway
+RUN adduser -D -u 1000 node && \
+    chown -R node:node /app && \
+    addgroup node docker
+
+ENV NODE_ENV=production
+ENV DOCKER_TLS_CERTDIR=""
+
+EXPOSE 18789 18790
+
+ENTRYPOINT ["/usr/local/bin/dind-entrypoint.sh"]
+CMD ["node", "openclaw.mjs", "gateway", "--allow-unconfigured"]
