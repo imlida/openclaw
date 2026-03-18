@@ -36,9 +36,14 @@ Commands:
   build                 Build image only
   start                 Start existing container
   stop                  Stop container
+  restart               Restart container
   logs                  Show container logs
   status                Check container status
   shell                 Open shell in container
+
+Apple Container Commands:
+  install               Setup with auto-start and process monitoring
+  uninstall             Remove auto-start configuration
 
 Environment Variables:
   OPENCLAW_RUNTIME      Container runtime: docker, dind, podman, apple-container
@@ -56,6 +61,9 @@ Examples:
   $0 --dind setup                      # Setup with Docker-in-Docker
   $0 --podman setup                    # Setup with Podman
   $0 --apple-container setup           # Setup with Apple Container
+  $0 --apple-container install         # Install with auto-start (macOS)
+  $0 --apple-container start           # Start service
+  $0 --apple-container status          # Check service status
   $0 --dind build                      # Build DinD image only
   $0 --docker logs                     # Show Docker logs
 
@@ -211,8 +219,45 @@ run_apple_container() {
   local cmd="${1:-setup}"
 
   case "$cmd" in
-    setup|build|start|stop|logs|status)
-      exec "$SCRIPT_DIR/setup-apple-container.sh"
+    setup)
+      log_info "Setting up OpenClaw with Apple Container..."
+      "$SCRIPT_DIR/setup-apple-container.sh" setup
+      ;;
+    install)
+      log_info "Installing OpenClaw with Apple Container (with auto-start)..."
+      "$SCRIPT_DIR/setup-apple-container.sh" install
+      ;;
+    uninstall)
+      log_info "Uninstalling OpenClaw Apple Container..."
+      "$SCRIPT_DIR/setup-apple-container.sh" uninstall
+      ;;
+    build)
+      log_info "Building Apple Container image..."
+      "$SCRIPT_DIR/setup-apple-container.sh" build
+      ;;
+    start)
+      log_info "Starting OpenClaw Apple Container..."
+      "$SCRIPT_DIR/setup-apple-container.sh" start
+      ;;
+    stop)
+      log_info "Stopping OpenClaw Apple Container..."
+      "$SCRIPT_DIR/setup-apple-container.sh" stop
+      ;;
+    restart)
+      log_info "Restarting OpenClaw Apple Container..."
+      "$SCRIPT_DIR/setup-apple-container.sh" restart
+      ;;
+    logs)
+      log_info "Showing Apple Container logs..."
+      "$SCRIPT_DIR/setup-apple-container.sh" logs
+      ;;
+    status)
+      log_info "Checking Apple Container status..."
+      "$SCRIPT_DIR/setup-apple-container.sh" status
+      ;;
+    shell)
+      log_warn "Apple Container does not support shell command directly."
+      log_info "Use: container exec -it openclaw sh"
       ;;
     *)
       log_error "Unknown command: $cmd"
