@@ -16,6 +16,16 @@ HEALTH_CHECK_INTERVAL="${OPENCLAW_HEALTH_INTERVAL:-30}"
 MAX_RESTART_ATTEMPTS="${OPENCLAW_MAX_RESTART:-5}"
 RESTART_COOLDOWN="${OPENCLAW_RESTART_COOLDOWN:-60}"
 
+# Restart policy: always, on-failure, unless-stopped, no (default: always)
+# - always: Always restart the container regardless of exit status
+# - on-failure: Restart only if container exits with non-zero status
+# - unless-stopped: Always restart except when explicitly stopped
+# - no: Never restart automatically
+RESTART_POLICY="${OPENCLAW_RESTART_POLICY:-always}"
+
+# Track manual stop to respect unless-stopped policy
+MANUAL_STOP_FILE="${OPENCLAW_CONFIG_DIR:-$HOME/.openclaw}/.manual_stop"
+
 # Paths
 LOG_DIR="${OPENCLAW_CONFIG_DIR:-$HOME/.openclaw}/logs"
 PID_FILE="${OPENCLAW_CONFIG_DIR:-$HOME/.openclaw}/openclaw.pid"
@@ -51,6 +61,49 @@ check_container_cmd() {
   fi
 }
 
+# Check if restart is allowed based on policy
+should_restart() {
+  local exit_code="${1:-0}"
+
+  case "$RESTART_POLICY" in
+    no)
+      return 1
+      ;;
+    always)
+      return 0
+      ;;
+    on-failure)
+      if [[ $exit_code -ne 0 ]]; then
+        return 0
+      else
+        log_info "Container exited cleanly (code: $exit_code), not restarting due to on-failure policy"
+        return 1
+      fi
+      ;;
+    unless-stopped)
+      if [[ -f "$MANUAL_STOP_FILE" ]]; then
+        log_info "Manual stop detected, not restarting due to unless-stopped policy"
+        return 1
+      fi
+      return 0
+      ;;
+    *)
+      # Default to always for unknown policies
+      return 0
+      ;;
+  esac
+}
+
+# Mark container as manually stopped
+mark_manual_stop() {
+  touch "$MANUAL_STOP_FILE"
+}
+
+# Clear manual stop marker
+clear_manual_stop() {
+  rm -f "$MANUAL_STOP_FILE"
+}
+
 # Check container health
 health_check() {
   local port="${1:-$GATEWAY_PORT}"
@@ -81,10 +134,19 @@ cleanup_container() {
   sleep 1
 }
 
+# Clean up container and mark as manually stopped (for stop commands)
+cleanup_and_mark_stopped() {
+  mark_manual_stop
+  cleanup_container
+}
+
 # Start container
 start_container() {
   log_info "Starting OpenClaw container..."
-  
+
+  # Clear manual stop marker when explicitly starting
+  clear_manual_stop
+
   # Generate token if not set
   local token="${OPENCLAW_GATEWAY_TOKEN:-}"
   if [[ -z "$token" ]]; then
@@ -125,36 +187,48 @@ start_container() {
   return 0
 }
 
-# Restart container with rate limiting
+# Restart container with rate limiting and policy check
 restart_container() {
+  local exit_code="${1:-1}"
   local current_count=0
   local last_restart=0
-  
+
+  # Check restart policy first
+  if ! should_restart "$exit_code"; then
+    log_info "Restart policy '$RESTART_POLICY' prevents restart"
+    return 1
+  fi
+
   # Read restart count and timestamp
   if [[ -f "$RESTART_COUNT_FILE" ]]; then
     read -r current_count last_restart < "$RESTART_COUNT_FILE" 2>/dev/null || true
   fi
-  
+
   local now
   now=$(date +%s)
-  
+
   # Reset count if enough time has passed
   if [[ $((now - last_restart)) -gt $RESTART_COOLDOWN ]]; then
     current_count=0
   fi
-  
-  # Check max restarts
+
+  # Check max restarts (disabled for 'always' policy after cooldown)
   if [[ $current_count -ge $MAX_RESTART_ATTEMPTS ]]; then
-    log_error "Max restart attempts ($MAX_RESTART_ATTEMPTS) reached. Waiting for cooldown..."
-    sleep "$RESTART_COOLDOWN"
-    current_count=0
+    if [[ "$RESTART_POLICY" == "always" ]]; then
+      log_warn "Max restart attempts reached, resetting after cooldown..."
+      sleep "$RESTART_COOLDOWN"
+      current_count=0
+    else
+      log_error "Max restart attempts ($MAX_RESTART_ATTEMPTS) reached. Giving up."
+      return 1
+    fi
   fi
-  
+
   # Increment and save
   current_count=$((current_count + 1))
   echo "$current_count $now" > "$RESTART_COUNT_FILE"
-  
-  log_warn "Restarting container (attempt $current_count/$MAX_RESTART_ATTEMPTS)..."
+
+  log_warn "Restarting container (attempt $current_count/$MAX_RESTART_ATTEMPTS, policy: $RESTART_POLICY)..."
   cleanup_container
   sleep 2
   start_container
@@ -180,6 +254,8 @@ wait_for_ready() {
 # Signal handlers
 cleanup_and_exit() {
   log_info "Received signal, shutting down..."
+  # Note: We don't mark as manually stopped here to allow restart on signal
+  # unless the policy is 'unless-stopped' and user explicitly stopped
   container stop "$CONTAINER_NAME" 2>/dev/null || true
   rm -f "$PID_FILE"
   exit 0
@@ -193,6 +269,7 @@ run_daemon() {
   log_info "Container: $CONTAINER_NAME"
   log_info "Image: $IMAGE_NAME"
   log_info "Port: $GATEWAY_PORT"
+  log_info "Restart policy: $RESTART_POLICY"
   log_info "Health check interval: ${HEALTH_CHECK_INTERVAL}s"
   
   check_container_cmd

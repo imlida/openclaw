@@ -85,13 +85,14 @@ build_image() {
 # Create LaunchAgent plist for auto-start
 create_launch_agent() {
   log_info "Creating LaunchAgent for auto-start..."
-  
+
   mkdir -p "$LAUNCH_AGENT_DIR"
   mkdir -p "$LOG_DIR"
-  
+
   local gateway_port="${OPENCLAW_GATEWAY_PORT:-18789}"
   local gateway_bind="${OPENCLAW_GATEWAY_BIND:-lan}"
   local tz="${OPENCLAW_TZ:-UTC}"
+  local restart_policy="${OPENCLAW_RESTART_POLICY:-always}"
   
   cat > "$LAUNCH_AGENT_PLIST" << EOF
 <?xml version="1.0" encoding="UTF-8"?>
@@ -145,6 +146,8 @@ create_launch_agent() {
         <string>$CONTAINER_NAME</string>
         <key>OPENCLAW_TZ</key>
         <string>$tz</string>
+        <key>OPENCLAW_RESTART_POLICY</key>
+        <string>$restart_policy</string>
     </dict>
 </dict>
 </plist>
@@ -199,6 +202,7 @@ OPENCLAW_GATEWAY_TOKEN=$(generate_token)
 OPENCLAW_IMAGE=$IMAGE_NAME
 OPENCLAW_CONTAINER_NAME=$CONTAINER_NAME
 OPENCLAW_TZ=${OPENCLAW_TZ:-UTC}
+OPENCLAW_RESTART_POLICY=${OPENCLAW_RESTART_POLICY:-always}
 EOF
   
   log_success "Environment configured"
@@ -275,13 +279,17 @@ start_container() {
 # Stop the container
 stop_container() {
   log_info "Stopping OpenClaw container..."
-  
+
+  # Mark as manually stopped for unless-stopped policy
+  local manual_stop_file="$OPENCLAW_CONFIG_DIR/.manual_stop"
+  touch "$manual_stop_file"
+
   if container stop "$CONTAINER_NAME" 2>/dev/null; then
     log_success "Container stopped"
   else
     log_warn "Container was not running"
   fi
-  
+
   # Clean up
   container rm "$CONTAINER_NAME" 2>/dev/null || true
 }
@@ -441,8 +449,15 @@ Environment Variables:
   OPENCLAW_GATEWAY_BIND     Bind address: lan, loopback (default: lan)
   OPENCLAW_GATEWAY_TOKEN    Gateway token (auto-generated if not set)
   OPENCLAW_TZ               Timezone (default: UTC)
+  OPENCLAW_RESTART_POLICY   Restart policy: always, on-failure, unless-stopped, no (default: always)
   OPENCLAW_DOCKER_APT_PACKAGES  Additional APT packages to install
   OPENCLAW_EXTENSIONS       Space-separated extension names to pre-install
+
+Restart Policies:
+  always          Always restart the container regardless of exit status
+  on-failure      Restart only if container exits with non-zero status
+  unless-stopped  Always restart except when explicitly stopped by user
+  no              Never restart automatically
 
 Examples:
   $0 install                          # Install with auto-start
@@ -450,6 +465,7 @@ Examples:
   $0 status                           # Check status
   $0 logs                             # View logs
   OPENCLAW_GATEWAY_PORT=8080 $0 install  # Use custom port
+  OPENCLAW_RESTART_POLICY=on-failure $0 install  # Restart only on failure
 
 EOF
 }
